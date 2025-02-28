@@ -6,6 +6,24 @@ __pycache__/
 # C extensions
 *.so
 
+# All I/O folders; create your own when you need them.
+TEMP/
+temp/
+tmp/
+TMP/
+input/
+output/
+npy/
+xml*/
+dicts/
+batch/
+DEBUG/
+debug/
+
+# All files and folders that start with DEBUG or debug.
+DEBUG*
+debug*
+
 # Distribution / packaging
 .Python
 build/
@@ -169,3 +187,43 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+### For macOS.
+### https://github.com/github/gitignore/blob/main/Global/macOS.gitignore
+# General
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Icon must end with two \r
+Icon
+
+# Thumbnails
+._*
+
+# Files that might appear in the root of a volume
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Directories potentially created on remote AFP share
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+#### for Mac ends
+
+# vscode
+.vscode/
+
+# Local History for Visual Studio Code
+.history/
+
+# Built Visual Studio Code Extensions
+*.vsix
