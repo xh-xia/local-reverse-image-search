@@ -8,8 +8,8 @@ https://github.com/JohannesBuchner/imagehash/blob/master/find_similar_images.py
 Created: 5:02 PM (EST)
 """
 
-import sys, os, json, sqlite3, pickle
-from collections import namedtuple
+import sys, os, json, sqlite3, pickle, csv
+from collections import namedtuple, defaultdict
 from PIL import Image
 import imagehash, pybktree, Levenshtein
 
@@ -36,7 +36,8 @@ def main():
 
     #### 4. Reverse image search.
     if params["operation"] == "search":
-        1
+        hex2path, hex2found = searchByImages(params, hashFunc, dbname="img", always_tree=True)
+        saveMatches2csv(hex2path, hex2found, params["input_dir"])
 
 
 # region SQL Functions
@@ -74,7 +75,6 @@ def updateDatabase(params, hashFunc, dbname="img", del_absent=True):
     con = sqlite3.connect(dbname)
     cur = con.cursor()
     cur.execute("UPDATE image SET present=FALSE;")
-    con.commit()
     for dir_ in params["img_dirs"]:
         fpaths = getAllImagePaths(dir_, relative=False)
         for i, fpath in enumerate(fpaths):
@@ -86,14 +86,13 @@ def updateDatabase(params, hashFunc, dbname="img", del_absent=True):
             else:  # Image is absent from db; insert it.
                 hashObj = hashFunc(getPILImage(fpath))
                 values = (*compKey, str(hashObj), os.path.getsize(fpath) / XBYTES, True)
-                s = ",".join(["?"] * len(values))
+                s = ",".join("?" for _ in values)
                 s = f"INSERT INTO image VALUES({s});"
                 cur.execute(s, values)
-    con.commit()
 
     if del_absent:  # Delete absent rows.
         cur.execute("DELETE FROM image WHERE present=FALSE;")
-        con.commit()
+    con.commit()
     con.close()
 
 
@@ -144,11 +143,7 @@ def insertData2Table(rows, db_dir, dbname="img"):
 def displayTable(db_dir, dbname="img"):
     con = sqlite3.connect(os.path.join(db_dir, f"{dbname}.db"))
     cur = con.cursor()
-    res = cur.execute(
-        """
-        SELECT * FROM image
-        """
-    )
+    res = cur.execute("SELECT * FROM image")
     res = res.fetchall()  # List.
     for r in res:
         print(r)
@@ -182,8 +177,9 @@ def updateBKTree(params, dbname="img", dist_method="hamming"):
 
     """
     if not os.path.isfile(os.path.join(params["bk_dir"], "bk_tree.pkl")):  # bk_tree doesn't exist, build it and done.
-        print("Started building bk-tree because bk_tree.pkl doesn't exist.")
+        print("Building bk-tree because bk_tree.pkl doesn't exist.")
         buildBKTree(params, dbname=dbname, dist_method=dist_method)
+        print("Done building.")
         return
 
     # Get images (set of 3-namedtuple) from bk.
@@ -199,8 +195,9 @@ def updateBKTree(params, dbname="img", dist_method="hamming"):
 
     # If the two sets are not equal, rebuild bk_tree and done.
     if imgs_bk != imgs_db:
-        print(f"Started building bk-tree because bk_tree.pkl doesn't match {dbname}.db.")
+        print(f"Building bk-tree because bk_tree.pkl doesn't match {dbname}.db.")
         buildBKTree(params, dbname=dbname, dist_method=dist_method)
+        print("Done building.")
 
 
 def add2BKTree(bk_tree, hash_hex, directory, filename):
@@ -213,31 +210,92 @@ def findInBKTree(bk_tree, hash_hex, directory=None, filename=None, dist_thres=1)
     return bk_tree.find(Img(hash_hex, directory, filename), dist_thres)
 
 
+def searchByImages(params, hashFunc, dbname="img", always_tree=True):
+    """<k> images in params["input_dir"], <n> images in db/tree.
+    Args:
+        always_tree (bool): Always do bk-tree search O(k*log(n)). Defaults to True.
+            Otherwise if params["distance_threshold"] == 0, query db to find exact hash match.
+            Which means O(n).
+
+    Returns:
+        _type_: _description_
+    """
+    # Get all images to search.
+    hex2path = defaultdict(list)
+    hex2found = defaultdict(list)
+    fpaths = getAllImagePaths(params["input_dir"], relative=False)
+    for fpath in fpaths:
+        compKey = os.path.split(fpath)  # Len-2 tuple.
+        hashObj = hashFunc(getPILImage(fpath))
+        hex2path[str(hashObj)].append(compKey)
+    # Find matching images.
+    hexes = list(hex2path.keys())
+    if params["distance_threshold"] == 0 and not always_tree:  # Exact hash match.
+        # Search db by hash_hex match.
+        dbname = os.path.join(params["db_dir"], f"{dbname}.db")
+        assert os.path.isfile(dbname)
+        con = sqlite3.connect(dbname)
+        cur = con.cursor()
+        query = ",".join("?" for _ in hexes)
+        query = f"SELECT directory, filename, hash_hex FROM image WHERE hash_hex IN ({query})"
+        res = cur.execute(query, hexes)
+        res = res.fetchall()  # List of directory, filename, hash_hex.
+        con.commit()
+        con.close()
+
+        for d, f, h in res:
+            hex2found[h].append((d, f))
+    else:  # bk-tree search.
+        if not os.path.isfile(os.path.join(params["bk_dir"], "bk_tree.pkl")):
+            print("Building bk-tree because bk_tree.pkl doesn't exist.")
+            buildBKTree(params, dbname=dbname, dist_method=params["distance_method"])
+            print("Done building.")
+        bk_tree = loadPKL(params["bk_dir"], "bk_tree")
+        for hash_hex in hexes:
+            fs = findInBKTree(bk_tree, hash_hex, dist_thres=params["distance_threshold"])
+            for _, f in fs:  # 1st item of the tuple is distance; 2nd item is Img (namedtuple).
+                hex2found[hash_hex].append((f.directory, f.filename))
+
+    return hex2path, hex2found
+
+
+def saveMatches2csv(hex2path, hex2found, dir_):
+    with open(os.path.join(dir_, "matches.csv"), "w", encoding="utf-8-sig", newline="") as csvfile:
+        spamwriter = csv.writer(csvfile, delimiter=",", quotechar='"')
+        spamwriter.writerow(["input_path", "match_path", "match_directory", "match_filename"])
+        for h, paths in hex2path.items():
+            path = " | ".join([os.path.join(*compKey) for compKey in paths])
+            for i, tup in enumerate(hex2found[h]):
+                if i == 0:
+                    spamwriter.writerow([path, os.path.join(*tup), tup[0], tup[1]])
+                else:
+                    spamwriter.writerow([None, os.path.join(*tup), tup[0], tup[1]])
+
+
 # endregion
 
 
 # region Helper Functions
 
 
-def searchByImages():
-    1
-
-
 def getParams():
-    fpath = os.path.join(CWD, "params.json")
+    tmp = CWD
+    tmp = os.path.join(CWD, "tmp")  # Remove this line for release ver.
+    fpath = os.path.join(tmp, "params.json")
     if os.path.isfile(fpath):
         with open(fpath) as f:
             params = json.load(f)
     else:
         params = dict()
-        params["db_dir"] = CWD
-        params["img_dirs"] = [CWD]
-        params["bk_dir"] = CWD
-        params["input_dir"] = os.path.join(CWD, "input")
+        params["db_dir"] = tmp
+        params["img_dirs"] = [tmp]
+        params["bk_dir"] = tmp
+        params["input_dir"] = os.path.join(tmp, "input")
         params["operation"] = "update"
         params["hash_method"] = "dhash"
         params["hash_size"] = 8  # Same default as in imagehash.
         params["distance_method"] = "hamming"
+        params["distance_threshold"] = 0
         with open(fpath, "w") as f:
             json.dump(params, f, indent=4)
     return params
